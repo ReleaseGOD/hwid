@@ -62,6 +62,10 @@ def add_hwid():
     guardar_hwids(hwids)
     return jsonify({"ok": True, "message": "HWID agregado"})
 
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({"status": "ok", "message": "Servidor de activación funcionando 🚀"})
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     print(f"Servidor de activación corriendo en http://0.0.0.0:{port}")
