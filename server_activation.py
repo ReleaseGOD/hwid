@@ -1,216 +1,130 @@
 from flask import Flask, request, jsonify
-import jwt
-import time
-import json
-import os
-from datetime import datetime, timezone
-
-# -------------------------------
-# CONFIGURACIÓN
-# -------------------------------
-
-SECRET_KEY = "03C00218044D05A9B706300700080009"   # 🔒 Cambia esto a una cadena segura
-ADMIN_TOKEN = "admin123"             # 🔑 Token que usarás en admin_cli.py
-HWID_FILE = "allowed_hwids.json"     # Archivo local donde se guardan los HWIDs
-TOKEN_EXPIRATION = 24 * 3600         # (Opcional) segundos que dura un token JWT (1 día)
+import jwt, datetime, json, os
 
 app = Flask(__name__)
 
-# -------------------------------
-# FUNCIONES AUXILIARES
-# -------------------------------
+SECRET = "03C00218044D05A9B706300700080009"  # cámbiala por una clave segura
+ADMIN_TOKEN = "admin123"  # token simple para proteger las rutas admin
+HWID_FILE = "allowed_hwids.json"
 
-def now_ts():
-    return int(time.time())
+# === UTILIDADES ===
 
-def parse_expires(expires):
-    """
-    Acepta:
-      - None -> devuelve None
-      - int (timestamp) -> devuelve int
-      - str con formato ISO -> convierte a timestamp
-    """
-    if expires is None:
-        return None
-    try:
-        return int(expires)
-    except Exception:
-        pass
-    try:
-        dt = datetime.fromisoformat(expires)
-        return int(dt.replace(tzinfo=timezone.utc).timestamp())
-    except Exception:
-        pass
-    return None
-
-def load_hwids_struct():
-    """Devuelve lista de dicts: [{'hwid':..., 'expires':timestamp_or_none}, ...]"""
+def cargar_hwids():
     if not os.path.exists(HWID_FILE):
         with open(HWID_FILE, "w") as f:
             json.dump([], f)
     with open(HWID_FILE, "r") as f:
-        try:
-            data = json.load(f)
-        except json.JSONDecodeError:
-            data = []
-    # migración: lista simple de strings → lista de dicts
-    if data and isinstance(data[0], str):
-        new = [{"hwid": h, "expires": None} for h in data]
-        with open(HWID_FILE, "w") as f:
-            json.dump(new, f, indent=2)
-        return new
-    return data
+        return json.load(f)
 
-def save_hwids_struct(lst):
+def guardar_hwids(hwids):
     with open(HWID_FILE, "w") as f:
-        json.dump(lst, f, indent=2)
+        json.dump(hwids, f, indent=2)
 
-def is_expired(item):
-    exp = item.get("expires")
-    if not exp:
-        return False
-    return int(time.time()) > int(exp)
-
-def find_hwid(hwid):
-    for item in load_hwids_struct():
-        if item.get("hwid") == hwid:
+def buscar_hwid(hwids, hwid):
+    for item in hwids:
+        if item["hwid"] == hwid:
             return item
     return None
 
-# -------------------------------
-# RUTA: ACTIVAR
-# -------------------------------
+def auth_admin(req):
+    token = req.headers.get("Authorization", "").replace("Bearer ", "")
+    return token == ADMIN_TOKEN
+
+# === ENDPOINTS PRINCIPALES ===
 
 @app.route("/activar", methods=["POST"])
 def activar():
     data = request.json or {}
     hwid = data.get("hwid")
     if not hwid:
-        return jsonify({"ok": False, "error": "no_hwid"}), 400
+        return jsonify({"error": "No se envió HWID"}), 400
 
-    item = find_hwid(hwid)
-    if not item:
-        return jsonify({"ok": False, "error": "hwid_not_allowed"}), 403
-    if is_expired(item):
-        return jsonify({"ok": False, "error": "hwid_expired"}), 403
+    hwids = cargar_hwids()
+    registro = buscar_hwid(hwids, hwid)
+    if not registro:
+        return jsonify({"error": "HWID no autorizado"}), 403
 
-    # Crear token JWT válido 24h
-    payload = {
-        "hwid": hwid,
-        "exp": int(time.time()) + TOKEN_EXPIRATION
-    }
-    token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
-    return jsonify({"ok": True, "token": token})
-
-# -------------------------------
-# RUTA: VERIFICAR TOKEN
-# -------------------------------
+    exp = datetime.datetime.strptime(registro["exp"], "%Y-%m-%d") if "exp" in registro else datetime.datetime.utcnow() + datetime.timedelta(days=30)
+    token = jwt.encode({"hwid": hwid, "exp": exp}, SECRET, algorithm="HS256")
+    return jsonify({"license": token})
 
 @app.route("/verificar", methods=["POST"])
 def verificar():
     data = request.json or {}
     token = data.get("token")
-    if not token:
-        return jsonify({"valid": False, "error": "no_token"}), 400
-
     try:
-        decoded = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
-        return jsonify({"valid": True, "data": decoded})
+        info = jwt.decode(token, SECRET, algorithms=["HS256"])
+        return jsonify({"valid": True, "data": info})
     except jwt.ExpiredSignatureError:
-        return jsonify({"valid": False, "error": "expired"})
-    except jwt.InvalidTokenError:
-        return jsonify({"valid": False, "error": "invalid"})
+        return jsonify({"valid": False, "error": "Licencia expirada"})
+    except Exception:
+        return jsonify({"valid": False, "error": "Licencia inválida"})
 
-# -------------------------------
-# ADMIN: LISTAR HWIDs
-# -------------------------------
+# === ENDPOINTS ADMIN ===
+
+@app.route("/admin/add_hwid", methods=["POST"])
+def add_hwid():
+    if not auth_admin(request):
+        return jsonify({"error": "No autorizado"}), 403
+
+    data = request.json or {}
+    hwid = data.get("hwid")
+    days = int(data.get("days", 30))
+    if not hwid:
+        return jsonify({"error": "No se envió HWID"}), 400
+
+    hwids = cargar_hwids()
+    if buscar_hwid(hwids, hwid):
+        return jsonify({"ok": False, "message": "HWID ya existe"})
+
+    exp = (datetime.datetime.utcnow() + datetime.timedelta(days=days)).strftime("%Y-%m-%d")
+    hwids.append({"hwid": hwid, "exp": exp})
+    guardar_hwids(hwids)
+    return jsonify({"ok": True, "message": f"HWID agregado con expiración {exp}"})
 
 @app.route("/admin/list_hwids", methods=["GET"])
-def admin_list_hwids():
-    token = request.headers.get("X-Admin-Token")
-    if token != ADMIN_TOKEN:
-        return jsonify({"error": "unauthorized"}), 401
-
-    lst = load_hwids_struct()
-    out = []
-    for item in lst:
-        out.append({
-            "hwid": item.get("hwid"),
-            "expires": item.get("expires"),
-            "expired": is_expired(item)
-        })
-    return jsonify({"hwids": out})
-
-# -------------------------------
-# ADMIN: AGREGAR / ACTUALIZAR HWID
-# -------------------------------
-
-@app.route("/admin/add_or_update_hwid", methods=["POST"])
-def admin_add_or_update_hwid():
-    token = request.headers.get("X-Admin-Token")
-    if token != ADMIN_TOKEN:
-        return jsonify({"error": "unauthorized"}), 401
-
-    data = request.json or {}
-    hwid = data.get("hwid")
-    if not hwid:
-        return jsonify({"ok": False, "error": "no_hwid"}), 400
-
-    lst = load_hwids_struct()
-
-    # calcular fecha de expiración
-    expires = None
-    if "days" in data:
-        try:
-            days = int(data.get("days", 0))
-            expires = int(time.time()) + days * 24 * 3600
-        except Exception:
-            expires = None
-    elif "expires" in data:
-        expires = parse_expires(data.get("expires"))
-
-    found = None
-    for it in lst:
-        if it.get("hwid") == hwid:
-            found = it
-            break
-
-    if found:
-        found["expires"] = expires
-        save_hwids_struct(lst)
-        return jsonify({"ok": True, "message": "updated", "hwid": hwid, "expires": expires})
-    else:
-        lst.append({"hwid": hwid, "expires": expires})
-        save_hwids_struct(lst)
-        return jsonify({"ok": True, "message": "added", "hwid": hwid, "expires": expires})
-
-# -------------------------------
-# ADMIN: ELIMINAR HWID
-# -------------------------------
+def list_hwids():
+    if not auth_admin(request):
+        return jsonify({"error": "No autorizado"}), 403
+    hwids = cargar_hwids()
+    return jsonify(hwids)
 
 @app.route("/admin/remove_hwid", methods=["POST"])
-def admin_remove_hwid():
-    token = request.headers.get("X-Admin-Token")
-    if token != ADMIN_TOKEN:
-        return jsonify({"error": "unauthorized"}), 401
-
+def remove_hwid():
+    if not auth_admin(request):
+        return jsonify({"error": "No autorizado"}), 403
     data = request.json or {}
     hwid = data.get("hwid")
     if not hwid:
-        return jsonify({"ok": False, "error": "no_hwid"}), 400
+        return jsonify({"error": "No se envió HWID"}), 400
 
-    lst = load_hwids_struct()
-    new = [it for it in lst if it.get("hwid") != hwid]
-    if len(new) == len(lst):
-        return jsonify({"ok": False, "message": "not_found"}), 404
-    save_hwids_struct(new)
-    return jsonify({"ok": True, "message": "removed", "hwid": hwid})
+    hwids = cargar_hwids()
+    updated = [h for h in hwids if h["hwid"] != hwid]
+    guardar_hwids(updated)
+    return jsonify({"ok": True, "message": f"HWID {hwid} eliminado"})
 
-# -------------------------------
-# INICIO DEL SERVIDOR
-# -------------------------------
+@app.route("/admin/update_hwid", methods=["POST"])
+def update_hwid():
+    if not auth_admin(request):
+        return jsonify({"error": "No autorizado"}), 403
+    data = request.json or {}
+    hwid = data.get("hwid")
+    days = int(data.get("days", 30))
+    if not hwid:
+        return jsonify({"error": "No se envió HWID"}), 400
+
+    hwids = cargar_hwids()
+    registro = buscar_hwid(hwids, hwid)
+    if not registro:
+        return jsonify({"error": "HWID no encontrado"}), 404
+
+    registro["exp"] = (datetime.datetime.utcnow() + datetime.timedelta(days=days)).strftime("%Y-%m-%d")
+    guardar_hwids(hwids)
+    return jsonify({"ok": True, "message": f"Expiración actualizada a {registro['exp']}"})
+
+# === MAIN ===
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    print(f"Servidor de activación corriendo en http://0.0.0.0:{port}")
+    port = int(os.environ.get("PORT", 5000))
+    print(f"Servidor corriendo en http://0.0.0.0:{port}")
     app.run(host="0.0.0.0", port=port)
