@@ -63,5 +63,6 @@ def add_hwid():
     return jsonify({"ok": True, "message": "HWID agregado"})
 
 if __name__ == "__main__":
-    print("Servidor de activación corriendo en http://127.0.0.1:5000")
-    app.run(port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    print(f"Servidor de activación corriendo en http://0.0.0.0:{port}")
+    app.run(host="0.0.0.0", port=port)
